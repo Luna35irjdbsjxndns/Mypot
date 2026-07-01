@@ -5,7 +5,9 @@ import os
 import time
 
 # ----------------- الإعدادات الأساسية -----------------
-TOKEN = "8169778248:AAFd7tm6pu0bOo2W8yRv0kLflvjFHU98VDk"  # توكن البوت الخاص بك
+# ⚠️ مهم جداً: لا تضع التوكن مباشرة في الكود إذا كنت ستشارك الملف أو ترفعه لأي مكان عام.
+# الأفضل قراءته من متغير بيئة. إن لم يوجد المتغير، يستخدم القيمة الاحتياطية أدناه (غيّرها بتوكنك).
+TOKEN = os.environ.get("BOT_TOKEN", "8169778248:AAFd7tm6pu0bOo2W8yRv0kLflvjFHU98VDk")
 ADMIN_ID = 8047341602  # الآيدي الخاص بك كمالك
 
 bot = telebot.TeleBot(TOKEN)
@@ -21,7 +23,7 @@ CATEGORIES_MAP = {
     "hair_removal": "منتجات إزالة شعر"
 }
 
-# ----------------- دالات إدارة البيانات (JSON) -----------------
+# ----------------- دوال إدارة البيانات (JSON) -----------------
 def load_products():
     if not os.path.exists(DB_FILE):
         initial_db = {key: [] for key in CATEGORIES_MAP.keys()}
@@ -29,7 +31,11 @@ def load_products():
             json.dump(initial_db, f, ensure_ascii=False, indent=4)
         return initial_db
     with open(DB_FILE, "r", encoding="utf-8") as f:
-        return json.load(f)
+        data = json.load(f)
+    # التأكد من وجود كل الأقسام حتى لو تم تعديل CATEGORIES_MAP لاحقاً
+    for key in CATEGORIES_MAP.keys():
+        data.setdefault(key, [])
+    return data
 
 def save_products(data):
     with open(DB_FILE, "w", encoding="utf-8") as f:
@@ -42,13 +48,25 @@ PRODUCTS = load_products()
 user_carts = {}
 user_steps = {}
 user_orders = {}
-admin_data = {}  # لحفظ مؤقت لبيانات المنتج المضاف الجديد
+admin_data = {}  # لحفظ مؤقت لبيانات المنتج المضاف/المعدّل
 users_list = set()
+
+# ----------------- أدوات مساعدة لبناء callback_data بأمان -----------------
+# نستخدم "::" كفاصل بدل "_" لأن مفاتيح الأقسام ومعرّفات المنتجات تحتوي على "_"
+# (مثال: weight_gain ، hair_removal ، p_1750000000) وهذا كان يكسر split("_") سابقاً.
+def cb(prefix, value=""):
+    return f"{prefix}::{value}" if value != "" else prefix
+
+def cb_parse(data):
+    if "::" in data:
+        prefix, _, value = data.partition("::")
+        return prefix, value
+    return data, ""
 
 # ----------------- الكيبوردات الجاهزة -----------------
 def get_main_keyboard():
     markup = types.InlineKeyboardMarkup(row_width=2)
-    buttons = [types.InlineKeyboardButton(text=name, callback_data=f"cat_{key}") for key, name in CATEGORIES_MAP.items()]
+    buttons = [types.InlineKeyboardButton(text=name, callback_data=cb("cat", key)) for key, name in CATEGORIES_MAP.items()]
     markup.add(*buttons)
     markup.add(types.InlineKeyboardButton(text="🛒 عرض سلة المشتريات", callback_data="view_cart"))
     return markup
@@ -70,34 +88,53 @@ def get_product_by_id(prod_id):
                 return item
     return None
 
+def clean(text):
+    """يمنع كسر Markdown عند وجود رموز خاصة داخل نص المنتج (اسم/وصف يكتبه الأدمن)."""
+    if text is None:
+        return ""
+    for ch in ["*", "_", "`", "["]:
+        text = text.replace(ch, "")
+    return text
+
 # ----------------- الأوامر الرئيسية -----------------
 @bot.message_handler(commands=['start'])
 def send_welcome(message):
     try:
         user_id = message.chat.id
         users_list.add(user_id)
-        
+        user_steps[user_id] = None
+
         welcome_text = (
-            "أهلاً وسهلا بك في بوت Nour Beauty 🤩😍\n"
-            "نقدم لك أفضل المنتجات التجميلية من ماركات   \_\_\_\_\_\_\_\_\_\_\_\_\_\_\_ عالمية 😍\_\_\_\_\_\_\_\_\_\_\_\_ \n"
+            "أهلاً وسهلاً بك في بوت Nour Beauty 🤩😍\n"
+            "نقدم لك أفضل المنتجات التجميلية من ماركات عالمية 😍\n"
             "في هذه القائمة ستجدين كل شيء تحتاجينه"
         )
         if user_id == ADMIN_ID:
-            welcome_text += "\n\n⚙️ **أنت المالك:** لإدارة المنتجات والأسعار أرسل الأمر: /admin"
-            
-        bot.send_message(user_id, welcome_text, reply_markup=get_main_keyboard(), parse_mode="Markdown")
+            welcome_text += "\n\n⚙️ أنت المالك: لإدارة المنتجات والأسعار أرسل الأمر: /admin"
+
+        bot.send_message(user_id, welcome_text, reply_markup=get_main_keyboard())
     except Exception as e:
-        print(f"خطأ في البدء: {e}")
+        print(f"حدث خطأ بسيط وتم تلافيه تلقائياً: {e}")
+
+@bot.message_handler(commands=['cancel'])
+def cancel_flow(message):
+    try:
+        user_id = message.chat.id
+        user_steps[user_id] = None
+        bot.send_message(user_id, "❎ تم إلغاء العملية الحالية.",
+                          reply_markup=get_admin_keyboard() if user_id == ADMIN_ID else get_main_keyboard())
+    except Exception as e:
+        print(f"حدث خطأ بسيط وتم تلافيه تلقائياً: {e}")
 
 @bot.message_handler(commands=['admin'])
 def admin_panel(message):
     try:
         if message.chat.id == ADMIN_ID:
-            bot.send_message(ADMIN_ID, "🛠️ **لوحة قيادة المالك الذكية:**\nاختر ماذا تريد أن تفعل بالمنتجات الآن:", reply_markup=get_admin_keyboard())
+            bot.send_message(ADMIN_ID, "🛠️ لوحة قيادة المالك الذكية:\nاختر ماذا تريد أن تفعل بالمنتجات الآن:", reply_markup=get_admin_keyboard())
         else:
             bot.send_message(message.chat.id, "عذراً، هذا الأمر خاص بالمالك فقط.")
     except Exception as e:
-        print(f"خطأ في الآدمن: {e}")
+        print(f"حدث خطأ بسيط وتم تلافيه تلقائياً: {e}")
 
 # ----------------- معالجة أزرار لوحة القيادة والتصفح -----------------
 @bot.callback_query_handler(func=lambda call: True)
@@ -106,133 +143,177 @@ def handle_query(call):
     try:
         user_id = call.message.chat.id
         data = call.data
+        prefix, value = cb_parse(data)
 
-        # تصفح زبائن
-        if data.startswith("cat_"):
-            category_key = data.split("_")[1]
+        # ---------- تصفح الزبائن ----------
+        if prefix == "cat":
+            category_key = value
             category_name = CATEGORIES_MAP.get(category_key, "القسم")
             products_list = PRODUCTS.get(category_key, [])
-            
+
             if not products_list:
-                bot.send_message(user_id, f"⚠️ لا توجد منتجات في قسم {category_name} حالياً.")
+                bot.answer_callback_query(call.id)
+                bot.send_message(user_id, f"⚠️ لا توجد منتجات في قسم {category_name} حالياً.", reply_markup=get_main_keyboard())
                 return
-                
-            bot.send_message(user_id, f"📦 **منتجات قسم {category_name}:**")
+
+            bot.answer_callback_query(call.id)
+            bot.send_message(user_id, f"📦 منتجات قسم {category_name}:")
             for prod in products_list:
                 markup = types.InlineKeyboardMarkup()
                 markup.add(
-                    types.InlineKeyboardButton("🔎 التفاصيل", callback_data=f"view_{prod['id']}"),
-                    types.InlineKeyboardButton("🛒 إضافة للسلة", callback_data=f"add_{prod['id']}")
+                    types.InlineKeyboardButton("🔎 التفاصيل", callback_data=cb("view", prod['id'])),
+                    types.InlineKeyboardButton("🛒 إضافة للسلة", callback_data=cb("add", prod['id']))
                 )
-                if prod["image"].startswith("http"):
-                    bot.send_photo(user_id, photo=prod["image"], caption=f"🛍️ **{prod['name']}**\n💰 السعر: {prod['price']}", reply_markup=markup, parse_mode="Markdown")
+                caption = f"🛍️ {clean(prod['name'])}\n💰 السعر: {clean(prod['price'])}"
+                if str(prod.get("image", "")).startswith("http"):
+                    try:
+                        bot.send_photo(user_id, photo=prod["image"], caption=caption, reply_markup=markup)
+                    except Exception:
+                        bot.send_message(user_id, caption, reply_markup=markup)
                 else:
-                    bot.send_message(user_id, f"🛍️ **{prod['name']}**\n💰 السعر: {prod['price']}", reply_markup=markup, parse_mode="Markdown")
+                    bot.send_message(user_id, caption, reply_markup=markup)
 
-        elif data.startswith("view_"):
-            prod_id = data.split("_")[1]
-            prod = get_product_by_id(prod_id)
+        elif prefix == "view":
+            prod = get_product_by_id(value)
+            bot.answer_callback_query(call.id)
             if prod:
                 markup = types.InlineKeyboardMarkup()
-                markup.add(types.InlineKeyboardButton("🛒 إضافة إلى السلة", callback_data=f"add_{prod_id}"))
+                markup.add(types.InlineKeyboardButton("🛒 إضافة إلى السلة", callback_data=cb("add", value)))
                 markup.add(types.InlineKeyboardButton("🔙 القائمة الرئيسية", callback_data="main_menu"))
-                caption = f"🛍️ **{prod['name']}**\n\n📝 **الوصف:**\n{prod['desc']}\n\n💰 **السعر:** {prod['price']}"
-                bot.send_message(user_id, caption, reply_markup=markup, parse_mode="Markdown")
+                caption = f"🛍️ {clean(prod['name'])}\n\n📝 الوصف:\n{clean(prod['desc'])}\n\n💰 السعر: {clean(prod['price'])}"
+                bot.send_message(user_id, caption, reply_markup=markup)
+            else:
+                bot.send_message(user_id, "⚠️ هذا المنتج لم يعد متوفراً.")
 
-        elif data.startswith("add_"):
-            prod_id = data.split("_")[1]
-            prod = get_product_by_id(prod_id)
+        elif prefix == "add":
+            prod = get_product_by_id(value)
             if prod:
-                if user_id not in user_carts: user_carts[user_id] = []
-                user_carts[user_id].append(prod)
+                user_carts.setdefault(user_id, []).append(prod)
                 bot.answer_callback_query(call.id, f"✅ أضيف {prod['name']} للسلة!", show_alert=True)
+            else:
+                bot.answer_callback_query(call.id, "⚠️ هذا المنتج لم يعد متوفراً.", show_alert=True)
 
         elif data == "view_cart":
+            bot.answer_callback_query(call.id)
             cart = user_carts.get(user_id, [])
             if not cart:
                 bot.send_message(user_id, "🛒 سلة المشتريات فارغة حالياً.", reply_markup=get_main_keyboard())
                 return
-            cart_text = "🛒 **محتويات سلتك الحالية:**\n\n"
+            cart_text = "🛒 محتويات سلتك الحالية:\n\n"
             for idx, item in enumerate(cart, 1):
                 cart_text += f"{idx}. {item['name']} - ({item['price']})\n"
             markup = types.InlineKeyboardMarkup()
-            markup.add(types.InlineKeyboardButton("✅ تأكيد وشراء الطلب", callback_data="checkout"), types.InlineKeyboardButton("🗑️ تفريغ السلة", callback_data="clear_cart"))
-            bot.send_message(user_id, cart_text, reply_markup=markup, parse_mode="Markdown")
+            markup.add(types.InlineKeyboardButton("✅ تأكيد وشراء الطلب", callback_data="checkout"))
+            markup.add(types.InlineKeyboardButton("🗑️ تفريغ السلة", callback_data="clear_cart"))
+            markup.add(types.InlineKeyboardButton("🔙 متابعة التسوق", callback_data="main_menu"))
+            bot.send_message(user_id, cart_text, reply_markup=markup)
 
         elif data == "clear_cart":
             user_carts[user_id] = []
+            bot.answer_callback_query(call.id, "تم تفريغ السلة")
             bot.send_message(user_id, "🗑️ تم إفراغ سلتك.", reply_markup=get_main_keyboard())
 
         elif data == "main_menu":
+            bot.answer_callback_query(call.id)
             bot.send_message(user_id, "🎛️ الأقسام الرئيسية:", reply_markup=get_main_keyboard())
 
         elif data == "checkout":
-            bot.send_message(user_id, "📝 الرجاء إرسال **الاسم الكامل** للمستلم:")
+            if not user_carts.get(user_id):
+                bot.answer_callback_query(call.id, "سلتك فارغة!", show_alert=True)
+                return
+            bot.answer_callback_query(call.id)
+            bot.send_message(user_id, "📝 الرجاء إرسال الاسم الكامل للمستلم (أو /cancel للإلغاء):")
             user_steps[user_id] = "get_name"
             user_orders[user_id] = {"items": user_carts.get(user_id, [])}
 
-        # ----- أقسام لوحة قيادة الآدمن -----
+        # ---------- لوحة قيادة الآدمن ----------
         elif data == "adm_add" and user_id == ADMIN_ID:
+            bot.answer_callback_query(call.id)
             markup = types.InlineKeyboardMarkup()
             for key, name in CATEGORIES_MAP.items():
-                markup.add(types.InlineKeyboardButton(name, callback_data=f"addto_{key}"))
+                markup.add(types.InlineKeyboardButton(name, callback_data=cb("addto", key)))
             bot.send_message(ADMIN_ID, "📁 اختر القسم الذي تريد إضافة المنتج إليه:", reply_markup=markup)
 
-        elif data.startswith("addto_") and user_id == ADMIN_ID:
-            cat_target = data.split("_")[1]
-            admin_data[ADMIN_ID] = {"category": cat_target}
-            bot.send_message(ADMIN_ID, "✍️ حسناً، أرسل الآن **اسم المنتج** الجديد:")
+        elif prefix == "addto" and user_id == ADMIN_ID:
+            bot.answer_callback_query(call.id)
+            admin_data[ADMIN_ID] = {"category": value}
+            bot.send_message(ADMIN_ID, "✍️ حسناً، أرسل الآن اسم المنتج الجديد (أو /cancel للإلغاء):")
             user_steps[ADMIN_ID] = "adm_get_name"
 
         elif data == "adm_del" and user_id == ADMIN_ID:
+            bot.answer_callback_query(call.id)
             markup = types.InlineKeyboardMarkup()
             for key, name in CATEGORIES_MAP.items():
-                markup.add(types.InlineKeyboardButton(name, callback_data=f"delcat_{key}"))
+                count = len(PRODUCTS.get(key, []))
+                markup.add(types.InlineKeyboardButton(f"{name} ({count})", callback_data=cb("delcat", key)))
             bot.send_message(ADMIN_ID, "📁 اختر القسم لحذف منتج منه:", reply_markup=markup)
 
-        elif data.startswith("delcat_") and user_id == ADMIN_ID:
-            cat_key = data.split("_")[1]
+        elif prefix == "delcat" and user_id == ADMIN_ID:
+            bot.answer_callback_query(call.id)
+            cat_key = value
+            products_list = PRODUCTS.get(cat_key, [])
+            if not products_list:
+                bot.send_message(ADMIN_ID, "⚠️ لا توجد منتجات في هذا القسم لحذفها.", reply_markup=get_admin_keyboard())
+                return
             markup = types.InlineKeyboardMarkup()
-            for prod in PRODUCTS.get(cat_key, []):
-                markup.add(types.InlineKeyboardButton(f"❌ {prod['name']}", callback_data=f"execute_del_{prod['id']}"))
+            for prod in products_list:
+                markup.add(types.InlineKeyboardButton(f"❌ {prod['name']}", callback_data=cb("execute_del", prod['id'])))
             markup.add(types.InlineKeyboardButton("🔙 إلغاء", callback_data="admin_main"))
             bot.send_message(ADMIN_ID, "🗑️ اضغط على المنتج الذي تريد حذفه نهائياً:", reply_markup=markup)
 
-        elif data.startswith("execute_del_") and user_id == ADMIN_ID:
-            prod_id = data.split("_")[2]
+        elif prefix == "execute_del" and user_id == ADMIN_ID:
+            prod_id = value
+            deleted_name = None
             for cat in PRODUCTS:
+                for p in PRODUCTS[cat]:
+                    if p["id"] == prod_id:
+                        deleted_name = p["name"]
                 PRODUCTS[cat] = [p for p in PRODUCTS[cat] if p["id"] != prod_id]
             save_products(PRODUCTS)
             bot.answer_callback_query(call.id, "✅ تم حذف المنتج بنجاح لحظياً!", show_alert=True)
-            bot.send_message(ADMIN_ID, "🛠️ تم التحديث الحظي.", reply_markup=get_admin_keyboard())
+            label = f" ({deleted_name})" if deleted_name else ""
+            bot.send_message(ADMIN_ID, f"🛠️ تم حذف المنتج{label} وتحديث المتجر.", reply_markup=get_admin_keyboard())
 
         elif data == "adm_price" and user_id == ADMIN_ID:
+            bot.answer_callback_query(call.id)
             markup = types.InlineKeyboardMarkup()
             for key, name in CATEGORIES_MAP.items():
-                markup.add(types.InlineKeyboardButton(name, callback_data=f"pricecat_{key}"))
+                count = len(PRODUCTS.get(key, []))
+                markup.add(types.InlineKeyboardButton(f"{name} ({count})", callback_data=cb("pricecat", key)))
             bot.send_message(ADMIN_ID, "📁 اختر القسم لتعديل سعر منتج فيه:", reply_markup=markup)
 
-        elif data.startswith("pricecat_") and user_id == ADMIN_ID:
-            cat_key = data.split("_")[1]
+        elif prefix == "pricecat" and user_id == ADMIN_ID:
+            bot.answer_callback_query(call.id)
+            cat_key = value
+            products_list = PRODUCTS.get(cat_key, [])
+            if not products_list:
+                bot.send_message(ADMIN_ID, "⚠️ لا توجد منتجات في هذا القسم.", reply_markup=get_admin_keyboard())
+                return
             markup = types.InlineKeyboardMarkup()
-            for prod in PRODUCTS.get(cat_key, []):
-                markup.add(types.InlineKeyboardButton(f"💰 {prod['name']} ({prod['price']})", callback_data=f"editprice_{prod['id']}"))
+            for prod in products_list:
+                markup.add(types.InlineKeyboardButton(f"💰 {prod['name']} ({prod['price']})", callback_data=cb("editprice", prod['id'])))
             bot.send_message(ADMIN_ID, "اختر المنتج الذي ترغب بتغيير سعره:", reply_markup=markup)
 
-        elif data.startswith("editprice_") and user_id == ADMIN_ID:
-            prod_id = data.split("_")[1]
-            admin_data[ADMIN_ID] = {"edit_price_id": prod_id}
-            bot.send_message(ADMIN_ID, "💰 أرسل السعر الجديد الآن (مثال: 50$ أو 250 ليرة):")
+        elif prefix == "editprice" and user_id == ADMIN_ID:
+            bot.answer_callback_query(call.id)
+            admin_data[ADMIN_ID] = {"edit_price_id": value}
+            bot.send_message(ADMIN_ID, "💰 أرسل السعر الجديد الآن (مثال: 50$ أو 250 ليرة) أو /cancel للإلغاء:")
             user_steps[ADMIN_ID] = "adm_get_new_price"
 
         elif data == "admin_broadcast" and user_id == ADMIN_ID:
-            bot.send_message(ADMIN_ID, "📢 أرسل نص رسالة الإعلان الجماعي:")
+            bot.answer_callback_query(call.id)
+            bot.send_message(ADMIN_ID, "📢 أرسل نص رسالة الإعلان الجماعي (أو /cancel للإلغاء):")
             user_steps[ADMIN_ID] = "get_broadcast_msg"
-            
+
         elif data == "admin_main" and user_id == ADMIN_ID:
+            bot.answer_callback_query(call.id)
             bot.send_message(ADMIN_ID, "🛠️ لوحة قيادة المالك:", reply_markup=get_admin_keyboard())
+
+        else:
+            bot.answer_callback_query(call.id)
+
     except Exception as e:
-        print(f"خطأ في الأزرار: {e}")
+        print(f"حدث خطأ في الأزرار وتم تخطيه تلقائياً: {e}")
 
 # ----------------- معالجة المدخلات النصية (زبائن + مالك) -----------------
 @bot.message_handler(func=lambda message: True)
@@ -240,99 +321,119 @@ def handle_text_inputs(message):
     global PRODUCTS
     try:
         user_id = message.chat.id
+        users_list.add(user_id)
         step = user_steps.get(user_id)
 
         # --- خطوات الشراء للعميل ---
         if step == "get_name":
             user_orders[user_id]["name"] = message.text
-            bot.send_message(user_id, "📍 أرسل **العنوان بالتفصيل**:")
+            bot.send_message(user_id, "📍 أرسل العنوان بالتفصيل:")
             user_steps[user_id] = "get_address"
+
         elif step == "get_address":
             user_orders[user_id]["address"] = message.text
-            bot.send_message(user_id, "📞 أرسل **رقم الهاتف**:")
+            bot.send_message(user_id, "📞 أرسل رقم الهاتف:")
             user_steps[user_id] = "get_phone"
+
         elif step == "get_phone":
             user_orders[user_id]["phone"] = message.text
             markup = types.ReplyKeyboardMarkup(resize_keyboard=True, one_time_keyboard=True)
             markup.add("💵 الدفع عند الاستلام (COD)", "💳 تحويل إلكتروني")
             bot.send_message(user_id, "💳 اختر طريقة الدفع:", reply_markup=markup)
             user_steps[user_id] = "get_payment"
+
         elif step == "get_payment":
             user_orders[user_id]["payment"] = message.text
             order_data = user_orders[user_id]
             bot.send_message(user_id, "🎉 تم استلام طلبك بنجاح ياباشا!", reply_markup=types.ReplyKeyboardRemove())
-            
+
             items_text = "".join([f"   - {item['name']} ({item['price']})\n" for item in order_data["items"]])
-            admin_invoice = f"🚨 **طلب جديد واصل!** 🚨\n\n👤 **العميل:** {order_data['name']}\n📞 **الهاتف:** {order_data['phone']}\n📍 **العنوان:** {order_data['address']}\n💳 **الدفع:** {order_data['payment']}\n\n📦 **المنتجات:**\n{items_text}"
-            bot.send_message(ADMIN_ID, admin_invoice, parse_mode="Markdown")
+            admin_invoice = (
+                f"🚨 طلب جديد واصل! 🚨\n\n"
+                f"👤 العميل: {order_data['name']}\n"
+                f"📞 الهاتف: {order_data['phone']}\n"
+                f"📍 العنوان: {order_data['address']}\n"
+                f"💳 الدفع: {order_data['payment']}\n\n"
+                f"📦 المنتجات:\n{items_text}"
+            )
+            bot.send_message(ADMIN_ID, admin_invoice)
             user_carts[user_id] = []
             user_steps[user_id] = None
 
         # --- خطوات لوحة القيادة التفاعلية (للمالك فقط) ---
-        elif user_id == ADMIN_ID:
-            if step == "adm_get_name":
-                admin_data[ADMIN_ID]["name"] = message.text
-                bot.send_message(ADMIN_ID, "💰 ممتاز، أرسل الآن **السعر** للمنتج:")
-                user_steps[ADMIN_ID] = "adm_get_price"
-                
-            elif step == "adm_get_price":
-                admin_data[ADMIN_ID]["price"] = message.text
-                bot.send_message(ADMIN_ID, "📝 أرسل الآن **الوصف والشرح** للمنتج:")
-                user_steps[ADMIN_ID] = "adm_get_desc"
-                
-            elif step == "adm_get_desc":
-                admin_data[ADMIN_ID]["desc"] = message.text
-                bot.send_message(ADMIN_ID, "🖼️ أرسل الآن **رابط صورة** المنتج (إذا لم يتوفر اكتب لا يوجد):")
-                user_steps[ADMIN_ID] = "adm_get_img"
-                
-            elif step == "adm_get_img":
-                img = message.text
-                admin_data[ADMIN_ID]["image"] = img if img.startswith("http") else "https://images.unsplash.com/photo-1522335789203-aabd1fc54bc9"
-                
-                cat = admin_data[ADMIN_ID]["category"]
-                prod_id = f"p_{int(time.time())}"
-                
-                new_product = {
-                    "id": prod_id,
-                    "name": admin_data[ADMIN_ID]["name"],
-                    "price": admin_data[ADMIN_ID]["price"],
-                    "desc": admin_data[ADMIN_ID]["desc"],
-                    "image": admin_data[ADMIN_ID]["image"]
-                }
-                
-                PRODUCTS[cat].append(new_product)
-                save_products(PRODUCTS)
-                
-                bot.send_message(ADMIN_ID, f"✅ تم إضافة منتج **({new_product['name']})** بنجاح وتحديث المتجر لحظياً للزبائن!", reply_markup=get_admin_keyboard())
-                user_steps[ADMIN_ID] = None
-                
-            elif step == "adm_get_new_price":
-                new_p = message.text
-                p_id = admin_data[ADMIN_ID]["edit_price_id"]
-                
-                for cat in PRODUCTS:
-                    for p in PRODUCTS[cat]:
-                        if p["id"] == p_id:
-                            p["price"] = new_p
-                            break
+        elif user_id == ADMIN_ID and step == "adm_get_name":
+            admin_data[ADMIN_ID]["name"] = message.text
+            bot.send_message(ADMIN_ID, "💰 ممتاز، أرسل الآن السعر للمنتج:")
+            user_steps[ADMIN_ID] = "adm_get_price"
+
+        elif user_id == ADMIN_ID and step == "adm_get_price":
+            admin_data[ADMIN_ID]["price"] = message.text
+            bot.send_message(ADMIN_ID, "📝 أرسل الآن الوصف والشرح للمنتج:")
+            user_steps[ADMIN_ID] = "adm_get_desc"
+
+        elif user_id == ADMIN_ID and step == "adm_get_desc":
+            admin_data[ADMIN_ID]["desc"] = message.text
+            bot.send_message(ADMIN_ID, "🖼️ أرسل الآن رابط صورة المنتج (إذا لم يتوفر اكتب: لا يوجد):")
+            user_steps[ADMIN_ID] = "adm_get_img"
+
+        elif user_id == ADMIN_ID and step == "adm_get_img":
+            img = message.text.strip()
+            admin_data[ADMIN_ID]["image"] = img if img.startswith("http") else "https://images.unsplash.com/photo-1522335789203-aabd1fc54bc9"
+
+            cat = admin_data[ADMIN_ID]["category"]
+            prod_id = f"p_{int(time.time()*1000)}"
+
+            new_product = {
+                "id": prod_id,
+                "name": admin_data[ADMIN_ID]["name"],
+                "price": admin_data[ADMIN_ID]["price"],
+                "desc": admin_data[ADMIN_ID]["desc"],
+                "image": admin_data[ADMIN_ID]["image"]
+            }
+
+            PRODUCTS.setdefault(cat, []).append(new_product)
+            save_products(PRODUCTS)
+
+            bot.send_message(ADMIN_ID, f"✅ تم إضافة منتج ({new_product['name']}) بنجاح وتحديث المتجر لحظياً للزبائن!", reply_markup=get_admin_keyboard())
+            user_steps[ADMIN_ID] = None
+            admin_data.pop(ADMIN_ID, None)
+
+        elif user_id == ADMIN_ID and step == "adm_get_new_price":
+            new_p = message.text.strip()
+            p_id = admin_data.get(ADMIN_ID, {}).get("edit_price_id")
+
+            found = False
+            for cat in PRODUCTS:
+                for p in PRODUCTS[cat]:
+                    if p["id"] == p_id:
+                        p["price"] = new_p
+                        found = True
+                        break
+            if found:
                 save_products(PRODUCTS)
                 bot.send_message(ADMIN_ID, "✅ تم تعديل السعر بنجاح وتحديثه فوراً!", reply_markup=get_admin_keyboard())
-                user_steps[ADMIN_ID] = None
+            else:
+                bot.send_message(ADMIN_ID, "⚠️ تعذر إيجاد المنتج (ربما تم حذفه).", reply_markup=get_admin_keyboard())
+            user_steps[ADMIN_ID] = None
+            admin_data.pop(ADMIN_ID, None)
 
-            elif step == "get_broadcast_msg":
-                bot.send_message(ADMIN_ID, "⏳ جاري الإرسال...")
-                success = 0
-                for u_id in list(users_list):
-                    try:
-                        bot.send_message(u_id, f"📢 **إعلان جديد من المتجر:**\n\n{message.text}", parse_mode="Markdown")
-                        success += 1
-                    except: pass
-                bot.send_message(ADMIN_ID, f"✅ تمت الإذاعة لـ {success} مستخدم.", reply_markup=get_admin_keyboard())
-                user_steps[ADMIN_ID] = None
+        elif user_id == ADMIN_ID and step == "get_broadcast_msg":
+            bot.send_message(ADMIN_ID, "⏳ جاري الإرسال...")
+            success = 0
+            failed = 0
+            for u_id in list(users_list):
+                try:
+                    bot.send_message(u_id, f"📢 إعلان جديد من المتجر:\n\n{message.text}")
+                    success += 1
+                except Exception:
+                    failed += 1
+            bot.send_message(ADMIN_ID, f"✅ تمت الإذاعة لـ {success} مستخدم. (فشل: {failed})", reply_markup=get_admin_keyboard())
+            user_steps[ADMIN_ID] = None
+
     except Exception as e:
-        print(f"خطأ في المدخلات: {e}")
+        print(f"حدث خطأ في المدخلات النصية وتم تخطيه تلقائياً: {e}")
 
 print("⚡ لوحة التحكم الذكية جاهزة للاستخدام اللحظي ياباشا...")
 
-# تم تحديث قيم الـ timeout إلى 60 لضمان استقرار الاتصال في ظروف الشبكة المتقلبة
-bot.infinity_polling(timeout=60, long_polling_timeout=60, logger_level=5)
+# التعديل المثالي لسرعة الاستجابة وإعادة الاتصال التلقائي الفوري دون توقف
+bot.infinity_polling(timeout=15, long_polling_timeout=5)
