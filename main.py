@@ -23,6 +23,22 @@ CATEGORIES_MAP = {
     "hair_removal": "منتجات إزالة شعر"
 }
 
+# المحافظات المتاحة للتوصيل (بعضها يحتوي على مناطق فرعية)
+GOVERNORATES = {
+    "latakia": {"name": "اللاذقية", "areas": ["اللاذقية", "جبلة"]},
+    "damascus": {"name": "دمشق", "areas": None},
+    "homs": {"name": "حمص", "areas": None},
+    "tartus": {"name": "طرطوس", "areas": None},
+    "hama": {"name": "حماه", "areas": ["حماه", "مصياف"]},
+    "idlib": {"name": "إدلب", "areas": None},
+}
+
+# طرق الدفع المتاحة وعناوين التحويل الخاصة بكل طريقة
+PAYMENT_METHODS = {
+    "sham_cash": {"name": "شام كاش", "address": "89cbb8227f1d8c4b3c24c17a74534415"},
+    "syriatel_cash": {"name": "سيرياتيل كاش", "address": "36762999"},
+}
+
 # ----------------- دوال إدارة البيانات (JSON) -----------------
 def load_products():
     if not os.path.exists(DB_FILE):
@@ -87,6 +103,45 @@ def get_product_by_id(prod_id):
             if item["id"] == prod_id:
                 return item
     return None
+
+def send_cart(user_id):
+    """يعرض محتويات السلة مع زر تقديم الطلب وزر رجوع (تُستخدم بعد الإضافة وعند طلب عرض السلة)."""
+    cart = user_carts.get(user_id, [])
+    if not cart:
+        bot.send_message(user_id, "🛒 سلة المشتريات فارغة حالياً.", reply_markup=get_main_keyboard())
+        return
+    cart_text = "🛒 محتويات سلتك الحالية:\n\n"
+    for idx, item in enumerate(cart, 1):
+        cart_text += f"{idx}. {item['name']} - ({item['price']})\n"
+    markup = types.InlineKeyboardMarkup()
+    markup.add(types.InlineKeyboardButton("✅ تقديم الطلب", callback_data="checkout"))
+    markup.add(types.InlineKeyboardButton("🗑️ تفريغ السلة", callback_data="clear_cart"))
+    markup.add(types.InlineKeyboardButton("🔙 متابعة التسوق", callback_data="main_menu"))
+    bot.send_message(user_id, cart_text, reply_markup=markup)
+
+def send_governorate_menu(user_id):
+    markup = types.InlineKeyboardMarkup(row_width=2)
+    buttons = [types.InlineKeyboardButton(info["name"], callback_data=cb("gov", key)) for key, info in GOVERNORATES.items()]
+    markup.add(*buttons)
+    markup.add(types.InlineKeyboardButton("🔙 رجوع", callback_data="view_cart"))
+    bot.send_message(user_id, "🗺️ اختر المحافظة التي تريد وصول الطلب إليها:", reply_markup=markup)
+
+def send_area_menu(user_id, gov_key):
+    info = GOVERNORATES[gov_key]
+    markup = types.InlineKeyboardMarkup(row_width=2)
+    for area in info["areas"]:
+        markup.add(types.InlineKeyboardButton(area, callback_data=cb("area", f"{gov_key}::{area}")))
+    markup.add(types.InlineKeyboardButton("🔙 رجوع", callback_data="back_gov"))
+    bot.send_message(user_id, f"📍 اختر المنطقة ضمن محافظة {info['name']}:", reply_markup=markup)
+
+def send_payment_menu(user_id):
+    markup = types.InlineKeyboardMarkup(row_width=1)
+    for key, info in PAYMENT_METHODS.items():
+        markup.add(types.InlineKeyboardButton(f"💳 {info['name']}", callback_data=cb("pay", key)))
+    gov_key = user_orders.get(user_id, {}).get("gov_key")
+    back_callback = cb("gov_back_to_area", gov_key) if gov_key and GOVERNORATES.get(gov_key, {}).get("areas") else "back_gov"
+    markup.add(types.InlineKeyboardButton("🔙 رجوع", callback_data=back_callback))
+    bot.send_message(user_id, "💳 اختر طريقة الدفع:", reply_markup=markup)
 
 def clean(text):
     """يمنع كسر Markdown عند وجود رموز خاصة داخل نص المنتج (اسم/وصف يكتبه الأدمن)."""
@@ -173,6 +228,11 @@ def handle_query(call):
                 else:
                     bot.send_message(user_id, caption, reply_markup=markup)
 
+            back_markup = types.InlineKeyboardMarkup()
+            back_markup.add(types.InlineKeyboardButton("🔙 القائمة الرئيسية", callback_data="main_menu"))
+            back_markup.add(types.InlineKeyboardButton("🛒 عرض السلة", callback_data="view_cart"))
+            bot.send_message(user_id, "⬅️ يمكنك الرجوع أو عرض سلتك:", reply_markup=back_markup)
+
         elif prefix == "view":
             prod = get_product_by_id(value)
             bot.answer_callback_query(call.id)
@@ -189,24 +249,14 @@ def handle_query(call):
             prod = get_product_by_id(value)
             if prod:
                 user_carts.setdefault(user_id, []).append(prod)
-                bot.answer_callback_query(call.id, f"✅ أضيف {prod['name']} للسلة!", show_alert=True)
+                bot.answer_callback_query(call.id, f"✅ أضيف {prod['name']} للسلة!")
+                send_cart(user_id)
             else:
                 bot.answer_callback_query(call.id, "⚠️ هذا المنتج لم يعد متوفراً.", show_alert=True)
 
         elif data == "view_cart":
             bot.answer_callback_query(call.id)
-            cart = user_carts.get(user_id, [])
-            if not cart:
-                bot.send_message(user_id, "🛒 سلة المشتريات فارغة حالياً.", reply_markup=get_main_keyboard())
-                return
-            cart_text = "🛒 محتويات سلتك الحالية:\n\n"
-            for idx, item in enumerate(cart, 1):
-                cart_text += f"{idx}. {item['name']} - ({item['price']})\n"
-            markup = types.InlineKeyboardMarkup()
-            markup.add(types.InlineKeyboardButton("✅ تأكيد وشراء الطلب", callback_data="checkout"))
-            markup.add(types.InlineKeyboardButton("🗑️ تفريغ السلة", callback_data="clear_cart"))
-            markup.add(types.InlineKeyboardButton("🔙 متابعة التسوق", callback_data="main_menu"))
-            bot.send_message(user_id, cart_text, reply_markup=markup)
+            send_cart(user_id)
 
         elif data == "clear_cart":
             user_carts[user_id] = []
@@ -222,9 +272,55 @@ def handle_query(call):
                 bot.answer_callback_query(call.id, "سلتك فارغة!", show_alert=True)
                 return
             bot.answer_callback_query(call.id)
-            bot.send_message(user_id, "📝 الرجاء إرسال الاسم الكامل للمستلم (أو /cancel للإلغاء):")
+            bot.send_message(user_id, "📝 الرجاء إرسال الاسم الثلاثي باللغة العربية (أو /cancel للإلغاء):")
             user_steps[user_id] = "get_name"
-            user_orders[user_id] = {"items": user_carts.get(user_id, [])}
+            user_orders[user_id] = {"items": list(user_carts.get(user_id, []))}
+
+        elif data == "back_gov":
+            bot.answer_callback_query(call.id)
+            send_governorate_menu(user_id)
+
+        elif prefix == "gov_back_to_area":
+            bot.answer_callback_query(call.id)
+            send_area_menu(user_id, value)
+
+        elif prefix == "gov":
+            bot.answer_callback_query(call.id)
+            gov_key = value
+            info = GOVERNORATES.get(gov_key)
+            if not info:
+                return
+            user_orders.setdefault(user_id, {})["gov_key"] = gov_key
+            if info["areas"]:
+                send_area_menu(user_id, gov_key)
+            else:
+                user_orders[user_id]["location"] = info["name"]
+                send_payment_menu(user_id)
+
+        elif prefix == "area":
+            bot.answer_callback_query(call.id)
+            gov_key, _, area_name = value.partition("::")
+            info = GOVERNORATES.get(gov_key)
+            if not info:
+                return
+            user_orders.setdefault(user_id, {})["location"] = f"{info['name']} - {area_name}"
+            send_payment_menu(user_id)
+
+        elif prefix == "pay":
+            bot.answer_callback_query(call.id)
+            method_key = value
+            method = PAYMENT_METHODS.get(method_key)
+            if not method:
+                return
+            user_orders.setdefault(user_id, {})["payment_method"] = method["name"]
+            bot.send_message(
+                user_id,
+                f"💳 الدفع عبر {method['name']}\n\n"
+                f"يمكنك الدفع على هذا العنوان:\n`{method['address']}`\n\n"
+                f"يرجى تقديم رقم العملية بعد إتمام التحويل (أو /cancel للإلغاء):",
+                parse_mode="Markdown"
+            )
+            user_steps[user_id] = "get_transaction"
 
         # ---------- لوحة قيادة الآدمن ----------
         elif data == "adm_add" and user_id == ADMIN_ID:
@@ -326,34 +422,35 @@ def handle_text_inputs(message):
 
         # --- خطوات الشراء للعميل ---
         if step == "get_name":
-            user_orders[user_id]["name"] = message.text
-            bot.send_message(user_id, "📍 أرسل العنوان بالتفصيل:")
-            user_steps[user_id] = "get_address"
-
-        elif step == "get_address":
-            user_orders[user_id]["address"] = message.text
+            user_orders[user_id]["name"] = message.text.strip()
             bot.send_message(user_id, "📞 أرسل رقم الهاتف:")
             user_steps[user_id] = "get_phone"
 
         elif step == "get_phone":
-            user_orders[user_id]["phone"] = message.text
-            markup = types.ReplyKeyboardMarkup(resize_keyboard=True, one_time_keyboard=True)
-            markup.add("💵 الدفع عند الاستلام (COD)", "💳 تحويل إلكتروني")
-            bot.send_message(user_id, "💳 اختر طريقة الدفع:", reply_markup=markup)
-            user_steps[user_id] = "get_payment"
+            user_orders[user_id]["phone"] = message.text.strip()
+            user_steps[user_id] = None
+            send_governorate_menu(user_id)
 
-        elif step == "get_payment":
-            user_orders[user_id]["payment"] = message.text
+        elif step == "get_transaction":
+            user_orders[user_id]["transaction_id"] = message.text.strip()
+            bot.send_message(user_id, "💵 يرجى كتابة المبلغ بالعملة الجديدة:")
+            user_steps[user_id] = "get_amount"
+
+        elif step == "get_amount":
+            user_orders[user_id]["amount"] = message.text.strip()
             order_data = user_orders[user_id]
-            bot.send_message(user_id, "🎉 تم استلام طلبك بنجاح ياباشا!", reply_markup=types.ReplyKeyboardRemove())
+            bot.send_message(user_id, "🎉 تم استلام طلبك بنجاح، سيتم التواصل معك قريباً!")
 
             items_text = "".join([f"   - {item['name']} ({item['price']})\n" for item in order_data["items"]])
             admin_invoice = (
                 f"🚨 طلب جديد واصل! 🚨\n\n"
-                f"👤 العميل: {order_data['name']}\n"
-                f"📞 الهاتف: {order_data['phone']}\n"
-                f"📍 العنوان: {order_data['address']}\n"
-                f"💳 الدفع: {order_data['payment']}\n\n"
+                f"👤 العميل: {order_data.get('name','-')}\n"
+                f"📞 الهاتف: {order_data.get('phone','-')}\n"
+                f"📍 المحافظة: {order_data.get('location','-')}\n"
+                f"💳 طريقة الدفع: {order_data.get('payment_method','-')}\n"
+                f"🧾 رقم العملية: {order_data.get('transaction_id','-')}\n"
+                f"💵 المبلغ المدفوع: {order_data.get('amount','-')}\n\n"
+                f"📦 عدد المنتجات: {len(order_data['items'])}\n"
                 f"📦 المنتجات:\n{items_text}"
             )
             bot.send_message(ADMIN_ID, admin_invoice)
